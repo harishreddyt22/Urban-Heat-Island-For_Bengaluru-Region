@@ -1,0 +1,94 @@
+// Define the study area (Bengaluru AOI)
+var AOI = table; // 50km buffer around Bengaluru
+
+// Load Landsat 9 TOA ImageCollection
+var L9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_TOA")
+  .filterBounds(AOI)
+  .filterDate('2024-04-01', '2024-05-31')  // Year 2024
+  .filterMetadata('CLOUD_COVER', 'less_than', 10);
+
+// Print collection details
+print("Landsat 9 Collection:", L9);
+print("Number of images:", L9.size());
+
+// Check if images exist
+if (L9.size().getInfo() > 0) {
+  // Select the first available image
+  var image = ee.Image(L9.first());
+  print("Selected Image Bands:", image.bandNames());
+
+  // Clip the image to Bengaluru AOI
+  var clippedImage = image.clip(AOI);
+
+  // Select the Thermal Band (Band 10 for Landsat 9)
+  var thermalBand = clippedImage.select('B10');
+
+  // Step 1: Convert TOA Radiance to Brightness Temperature (BT) in Kelvin
+  var k1 = 774.89;  // K1 constant for Landsat 9 Band 10
+  var k2 = 1321.08; // K2 constant for Landsat 9 Band 10
+  var BT = thermalBand.expression(
+    "(K2 / log((K1 / Radiance) + 1))",
+    {
+      "Radiance": thermalBand, 
+      "K1": k1, 
+      "K2": k2
+    }
+  ).rename("Brightness_Temperature");
+
+  // Convert BT to Celsius
+  var BT_Celsius = BT.subtract(273.15).rename("Brightness_Temperature_Celsius");
+
+  // Step 2: Calculate NDVI for Land Surface Emissivity (LSE) estimation
+  var nir = clippedImage.select('B5');
+  var red = clippedImage.select('B4');
+  var ndvi = nir.subtract(red).divide(nir.add(red)).rename("NDVI");
+
+  // Step 3: Estimate Land Surface Emissivity (LSE)
+  var lse = ndvi.expression(
+    "(b(0) > 0.2) ? (0.004 * b(0) + 0.986) : 0.986",  // Fix: Use b(0) for NDVI
+    [ndvi]
+  ).rename("LSE");
+
+  // Step 4: Calculate Land Surface Temperature (LST) in Kelvin
+  var wavelength = 10.9e-6;  // Wavelength of Landsat 9 Band 10 in meters
+  var p = 1.4388e-2;  // Planck’s constant * Speed of light / Boltzmann constant
+
+  var lst_K = BT.expression(
+    "BT / (1 + (W * (BT / P)) * log(LSE))",
+    {
+      "BT": BT,
+      "W": wavelength,
+      "P": p,
+      "LSE": lse
+    }
+  ).rename("LST_Kelvin");
+
+  // Convert LST from Kelvin to Celsius
+  var lst_C = lst_K.subtract(273.15).rename("LST_Celsius");
+
+  // Visualization parameters for LST in Celsius
+  var lstParams = {min: 20, max: 50, palette: ['blue', 'green', 'yellow', 'red']};
+
+  // Center the map on Bengaluru
+  Map.centerObject(AOI, 9);
+
+  // Add LST (Celsius) layer to the map
+  Map.addLayer(lst_C, lstParams, 'Land Surface Temperature (LST) - 2024 (°C)');
+
+  // Add a true-color Landsat 9 image for reference
+  var visParams = {bands: ['B4', 'B3', 'B2'], min: 0, max: 0.3, gamma: 1.4};
+  Map.addLayer(clippedImage, visParams, 'Landsat 9 True Color');
+
+  // Export LST image (Celsius) to Google Drive
+  Export.image.toDrive({
+    image: lst_C.toFloat(),
+    description: "LST_Bengaluru_2024_Celsius",
+    region: AOI.geometry().bounds(),
+    scale: 30,
+    maxPixels: 1e13,
+    fileFormat: "GeoTIFF"
+  });
+
+} else {
+  print("No Landsat 9 images found for Bengaluru in this date range.");
+}
