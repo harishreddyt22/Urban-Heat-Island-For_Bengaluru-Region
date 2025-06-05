@@ -1,0 +1,109 @@
+// Load Sentinel-5P data for NO2, SO2, and CO
+var NO2 = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_NO2");
+var SO2 = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_SO2");
+var CO = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_CO");
+
+// Define the AOI (Area of Interest) – Modify with actual coordinates or feature
+var AOI = table; // Example: Dhaka region
+
+// Filter date range and select required bands
+var startDate = '2024-04-01';
+var endDate = '2024-05-31';
+
+var no2_image = NO2.filterBounds(AOI)
+                   .filterDate(startDate, endDate)
+                   .select("NO2_column_number_density")
+                   .mean()
+                   .clip(AOI);
+
+var so2_image = SO2.filterBounds(AOI)
+                   .filterDate(startDate, endDate)
+                   .select("SO2_column_number_density")
+                   .mean()
+                   .clip(AOI);
+
+var co_image = CO.filterBounds(AOI)
+                 .filterDate(startDate, endDate)
+                 .select("CO_column_number_density")
+                 .mean()
+                 .clip(AOI);
+
+// Visualizations
+var band_viz = {
+  min: 0, max: 0.0002,
+  palette: ['black', 'blue', 'purple', 'cyan', 'green', 'yellow', 'red']
+};
+
+Map.addLayer(no2_image, band_viz, "NO2 Mean");
+Map.addLayer(so2_image, band_viz, "SO2 Mean");
+Map.addLayer(co_image, band_viz, "CO Mean");
+Map.centerObject(AOI, 10);
+
+// Export NO2, SO2, CO as GeoTIFF images to Google Drive
+Export.image.toDrive({
+  image: no2_image,
+  description: "NO2_bengaluru_2024",
+  folder: "Air_Quality_2024",
+  region: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: so2_image,
+  description: "SO2_bengaluru_2024",
+  folder: "Air_Quality_2024",
+  region: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: co_image,
+  description: "CO_bengaluru_2024",
+  folder: "Air_Quality_2024",
+  region: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+// Convert raster data to CSV
+var mean_no2 = no2_image.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+var mean_so2 = so2_image.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+var mean_co = co_image.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: AOI,
+  scale: 1113.2,
+  maxPixels: 1e13
+});
+
+// Combine data into a feature collection
+var features = ee.Feature(null, {
+  'NO2 (mol/m²)': mean_no2.get('NO2_column_number_density'),
+  'SO2 (mol/m²)': mean_so2.get('SO2_column_number_density'),
+  'CO (mol/m²)': mean_co.get('CO_column_number_density'),
+  'Start Date': startDate,
+  'End Date': endDate
+});
+
+var featureCollection = ee.FeatureCollection([features]);
+
+// Export CSV to Google Drive
+Export.table.toDrive({
+  collection: featureCollection,
+  description: "NO2_SO2_CO_Stats_bengaluru_2024",
+  folder: "Air_Quality_2024",
+  fileFormat: "CSV"
+});
