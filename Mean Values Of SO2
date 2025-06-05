@@ -1,0 +1,110 @@
+// ---------------------- STEP 1: DEFINE AOIs ---------------------- //
+// Import boundary datasets (Ensure you have correct boundaries)
+var urban_AOI = urban_table;  // Urban boundary of Bengaluru
+var rural_AOI = rural_table;  // Rural boundary of Bengaluru
+
+// ---------------------- STEP 2: LAND SURFACE TEMPERATURE (LST) ---------------------- //
+// Load MODIS LST (MOD11A2) - 8-day composite, 1 km resolution
+var LST = ee.ImageCollection("MODIS/061/MOD11A2")
+            .select("LST_Night_1km")  // Nighttime LST Band
+            .map(function(img) { return img.multiply(0.02).subtract(273.15); }); // Convert to Celsius
+
+// Define date range
+var startYear = 2019;
+var endYear = 2024;
+
+// Function to calculate yearly mean LST for urban and rural areas
+var yearlyLST = ee.List.sequence(startYear, endYear).map(function(year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = startDate.advance(1, 'year');
+
+  var lst_yearly = LST.filterDate(startDate, endDate).mean(); // Compute mean for the year
+
+  var urban_LST = lst_yearly.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: urban_AOI,
+    scale: 1000,
+    maxPixels: 1e13
+  }).get("LST_Night_1km");
+
+  var rural_LST = lst_yearly.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: rural_AOI,
+    scale: 1000,
+    maxPixels: 1e13
+  }).get("LST_Night_1km");
+
+  return ee.Feature(null, {
+    'Year': year,
+    'Urban Nighttime LST (°C)': urban_LST,
+    'Rural Nighttime LST (°C)': rural_LST,
+    'UHI Intensity (°C)': ee.Number(urban_LST).subtract(ee.Number(rural_LST))
+  });
+});
+
+// ---------------------- STEP 3: AIR POLLUTION DATA ---------------------- //
+// Load Sentinel-5P Data (NO₂, SO₂, CO)
+var NO2 = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_NO2").select("NO2_column_number_density");
+var SO2 = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_SO2").select("SO2_column_number_density");
+var CO = ee.ImageCollection("COPERNICUS/S5P/OFFL/L3_CO").select("CO_column_number_density");
+
+// Function to calculate yearly mean pollution levels over urban area
+var yearlyPollution = ee.List.sequence(startYear, endYear).map(function(year) {
+  var startDate = ee.Date.fromYMD(year, 1, 1);
+  var endDate = startDate.advance(1, 'year');
+
+  var no2_mean = NO2.filterDate(startDate, endDate).mean().reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: urban_AOI,
+    scale: 1113.2,
+    maxPixels: 1e13
+  }).get("NO2_column_number_density");
+
+  var so2_mean = SO2.filterDate(startDate, endDate).mean().reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: urban_AOI,
+    scale: 1113.2,
+    maxPixels: 1e13
+  }).get("SO2_column_number_density");
+
+  var co_mean = CO.filterDate(startDate, endDate).mean().reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: urban_AOI,
+    scale: 1113.2,
+    maxPixels: 1e13
+  }).get("CO_column_number_density");
+
+  return ee.Feature(null, {
+    'Year': year,
+    'NO2 (mol/m²)': no2_mean,
+    'SO2 (mol/m²)': so2_mean,
+    'CO (mol/m²)': co_mean
+  });
+});
+
+// ---------------------- STEP 4: CORRELATION DATASET ---------------------- //
+// Merge LST and Pollution Data into one FeatureCollection
+var UHI_Features = ee.FeatureCollection(yearlyLST);
+var Pollution_Features = ee.FeatureCollection(yearlyPollution);
+
+// Merge features by year
+var combinedData = UHI_Features.map(function(f) {
+  var year = f.get('Year');
+  var pollution = Pollution_Features.filter(ee.Filter.eq('Year', year)).first();
+  return f.set({
+    'NO2 (mol/m²)': pollution.get('NO2 (mol/m²)'),
+    'SO2 (mol/m²)': pollution.get('SO2 (mol/m²)'),
+    'CO (mol/m²)': pollution.get('CO (mol/m²)')
+  });
+});
+
+// ---------------------- STEP 5: EXPORT DATA ---------------------- //
+// Export the dataset as CSV to Google Drive
+Export.table.toDrive({
+  collection: combinedData,
+  description: "Yearly_UHI_Pollution_Bengaluru",
+  folder: "UHI_Analysis_2024",
+  fileFormat: "CSV"
+});
+
+print("Yearly UHI & Pollution Data Computed and Export Started.");
