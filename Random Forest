@@ -1,0 +1,133 @@
+// Bengaluru region boundary
+var roi = bengaluru_boundaries;
+// Define common year range for consistency
+var year_start = 1994;
+var year_end = 2024;
+
+// Load MODIS Land Surface Temperature (LST) Data
+var lst_april = ee.ImageCollection('MODIS/006/MOD11A2')
+  .filterBounds(roi)
+  .filter(ee.Filter.calendarRange(4, 4, 'month'))
+  .filter(ee.Filter.date(year_start + '-01-01', year_end + '-12-31'))
+  .select('LST_Day_1km')
+  .mean()
+  .multiply(0.02)
+  .subtract(273.15)
+  .rename('LST_April');
+
+var lst_may = ee.ImageCollection('MODIS/006/MOD11A2')
+  .filterBounds(roi)
+  .filter(ee.Filter.calendarRange(5, 5, 'month'))
+  .filter(ee.Filter.date(year_start + '-01-01', year_end + '-12-31'))
+  .select('LST_Day_1km')
+  .mean()
+  .multiply(0.02)
+  .subtract(273.15)
+  .rename('LST_May');
+
+// Display LST Data
+Map.addLayer(lst_april.clip(roi), { min: 0, max: 50, palette: ['purple', 'blue', 'cyan', 'green', 'yellow', 'red'] }, 'LST April');
+Map.addLayer(lst_may.clip(roi), { min: 0, max: 50, palette: ['purple', 'blue', 'cyan', 'green', 'yellow', 'red'] }, 'LST May');
+
+// Load Population Data
+var pop = ee.ImageCollection('WorldPop/GP/100m/pop')
+  .filterBounds(roi)
+  .sort('system:time_start', false)
+  .first()
+  .rename('pop');
+Map.addLayer(pop.clip(roi), { min: 0, max: 100, palette: ['black', 'red', 'white'] }, 'Population', false);
+
+// Load Elevation Data
+var elevation = ee.Image('NASA/NASADEM_HGT/001').select('elevation');
+Map.addLayer(elevation.clip(roi), { min: 0, max: 3000, palette: ['green', 'yellow', 'red', 'white'] }, 'Elevation', false);
+
+// Combine All Data Layers
+var combined = ee.Image([lst_april, lst_may, pop, elevation]).clip(roi);
+
+// Sample the Data
+var sample = combined.sample({
+  numPixels: 10000,
+  region: roi,
+  scale: 100,
+  geometries: true
+}).randomColumn();
+
+// Split into Train and Test
+var train = sample.filter(ee.Filter.lte('random', 0.8));
+var test = sample.filter(ee.Filter.gt('random', 0.8));
+
+print('Train size', train.size(), 'Test size', test.size());
+
+// Train Random Forest Regression Model
+var regression = ee.Classifier.smileRandomForest(50)
+  .train(train, 'LST_April', ['LST_May', 'elevation', 'pop'])
+  .setOutputMode('REGRESSION');
+
+print('Regression RF', regression.explain());
+
+// Make Predictions
+var predictionLST = combined.classify(regression, 'LST_Prediction');
+Map.addLayer(predictionLST.clip(roi), { min: 0, max: 50, palette: ['purple', 'blue', 'cyan', 'green', 'yellow', 'red'] }, 'LST Prediction');
+
+// Apply Model to Test Data
+var testData = test.classify(regression, 'LST_Prediction')
+  .map(function(data) {
+    return data.set({
+      'actual': data.get('LST_April'),
+      'predicted': data.get('LST_Prediction'),
+      'error': ee.Number(data.get('LST_April')).subtract(data.get('LST_Prediction')).abs()
+    });
+  });
+
+// Compute RMSE (Root Mean Squared Error)
+var mse = testData.map(function(data) {
+  var diff = ee.Number(data.get('actual')).subtract(data.get('predicted'));
+  return data.set('squared_error', diff.pow(2));
+}).aggregate_mean('squared_error');
+
+var rmse = mse.sqrt();
+print('RMSE:', rmse);
+
+// Compute R² (Coefficient of Determination)
+var mean_actual = testData.aggregate_mean('actual');
+
+// Compute SST (Total Sum of Squares)
+var ss_total = testData.map(function(data) {
+  return data.set('sst', ee.Number(data.get('actual')).subtract(mean_actual).pow(2));
+}).aggregate_sum('sst');
+
+// Compute SSE (Sum of Squared Errors / Residual Sum of Squares)
+var ss_residual = testData.map(function(data) {
+  return data.set('sse', ee.Number(data.get('actual')).subtract(data.get('predicted')).pow(2));
+}).aggregate_sum('sse');
+
+// Calculate R²
+var r_squared = ee.Number(1).subtract(ss_residual.divide(ss_total));
+print('R²:', r_squared);
+
+// Compute Mean Absolute Percentage Error (MAPE)
+var mape = testData.map(function(data) {
+  var actual = ee.Number(data.get('actual'));
+  var predicted = ee.Number(data.get('predicted'));
+  var error = actual.subtract(predicted).abs().divide(actual).multiply(100); // Absolute percentage error
+  return data.set('mape', error);
+}).aggregate_mean('mape');
+
+// Compute Accuracy as (100 - MAPE)
+var accuracy = ee.Number(100).subtract(mape);
+print('MAPE:', mape);
+print('Prediction Accuracy (%):', accuracy);
+
+// Accuracy Visualization
+var chart = ui.Chart.feature.byFeature(testData, 'actual', ['predicted'])
+  .setChartType('ScatterChart')
+  .setOptions({
+    dataOpacity: 0.3,
+    title: 'LST Actual vs Prediction (Bengaluru - April & May)',
+    hAxis: { title: 'LST April & May Actual' },
+    vAxis: { title: 'LST Prediction' },
+    series: { 1: { color: 'blue' } },
+    trendlines: { 1: { opacity: 0.3, type: 'linear', showR2: true, color: 'blue' } }
+  });
+
+print(chart);
