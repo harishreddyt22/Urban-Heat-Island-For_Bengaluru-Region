@@ -1,0 +1,69 @@
+// Spatio-Temporal Analysis of Land Surface Temperature Using Landsat-8 Data in GEE
+// Focus: LST Calculation for a Given Time Period
+
+// Center the map on the study area
+Map.centerObject(roi, 12);
+Map.addLayer(roi, {}, 'Study Area');
+
+// Define the time range for analysis
+var startDate = '2014-04-01';  // Modify as needed
+var endDate = '2024-05-31';
+
+// Load Landsat 8 Collection with filtering
+var landsatCollection = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+  .filterDate(startDate, endDate)
+  .filterBounds(roi)
+  .filter(ee.Filter.lt('CLOUD_COVER', 10))  // Remove cloudy images
+  .select(['ST_B10']);  // Select thermal band for LST
+
+// Convert Landsat 8 temperature band from Kelvin to Celsius
+var calculateLST = function(image) {
+  var lstCelsius = image.select('ST_B10')
+    .multiply(0.00341802)  // Scale factor for LST
+    .add(149.0)
+    .subtract(273.15);  // Convert to Celsius
+  return image.addBands(lstCelsius.rename('LST_Celsius'))
+    .copyProperties(image, ['system:time_start', 'system:index']);
+};
+
+// Apply LST calculation to the collection
+var lstCollection = landsatCollection.map(calculateLST);
+
+// Visualization parameters for LST
+var lstVisParams = {
+  min: 20,
+  max: 50,
+  palette: ['blue', 'green', 'yellow', 'orange', 'red']
+};
+
+// Compute mean LST for the selected time period
+var lstMean = lstCollection.select('LST_Celsius').mean().clip(roi); // Ensure only one band
+
+// Add Mean LST Layer to the map
+Map.addLayer(lstMean, lstVisParams, 'Mean LST (' + startDate + ' to ' + endDate + ')');
+
+// Create time series analysis of LST
+print(ui.Chart.image.series({
+  imageCollection: lstCollection.select('LST_Celsius'),
+  region: roi,
+  reducer: ee.Reducer.mean(),
+  scale: 1000,
+  xProperty: 'system:time_start'
+}).setOptions({
+  title: 'LST Time Series (' + startDate + ' to ' + endDate + ')',
+  hAxis: {title: 'Year'},
+  vAxis: {title: 'Temperature (°C)'},
+  lineWidth: 2,
+  colors: ['red']
+}));
+
+// Export LST image to Google Drive
+Export.image.toDrive({
+  image: lstMean,
+  description: 'LST_Mean_' + startDate.replace(/-/g, '') + '' + endDate.replace(/-/g, '_'),
+  scale: 30,
+  region: roi,
+  maxPixels: 1e13,
+  folder: 'LST_Analysis',
+  crs: 'EPSG:4326'
+});
